@@ -1,0 +1,46 @@
+
+# S32 Design Studio / Eclipse metadata
+.metadata/
+.settings/
+.project
+.cproject
+
+# Build output
+Debug/
+Debug_FLASH/
+Release/
+build/
+dist/
+out/
+
+# Generated binaries and reports
+*.elf
+*.map
+*.bin
+*.hex
+*.srec
+*.mot
+*.lst
+
+# Compiler intermediates
+*.o
+*.obj
+*.d
+*.dep
+*.su
+*.mk
+
+# IDE, debugger, and temporary files
+.cache/
+.vscode/
+.idea/
+*.launch
+*.log
+*.bak
+*.tmp
+*.swp
+*~
+
+# Operating-system files
+.DS_Store
+Thumbs.db
