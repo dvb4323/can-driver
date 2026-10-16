@@ -12,6 +12,7 @@ extern "C" {
  * Never call alongside the original main.c CAN sequence or another CAN0 owner.
  * Lifecycle calls are synchronous RTD calls (dummy timeout counter currently).
  */
+/* Generated loopback template is copied privately; only mode is overridden. */
 Can_Status CanDriver_Init(const Can_Config *config);
 Can_Status CanDriver_Start(void);
 /* Stop refuses an unconsumed TX; call PollTx until completion first.
@@ -21,6 +22,17 @@ Can_Status CanDriver_Stop(void);
 /* Requires READY or FAULT. FAULT deinit explicitly discards outstanding work. */
 Can_Status CanDriver_Deinit(void);
 Can_DriverState CanDriver_GetState(void);
+
+/* Call once per foreground polling round (RUNNING only). Reads ESR1 once,
+ * including its read side effects; faults also sample before being published.
+ * Bus-off is latched in diagnostics; it does not cancel a pending transfer.
+ */
+Can_Status CanDriver_PollDiagnostics(void);
+/* Cache-only, valid in every state; never reads hardware. Check out->valid.
+ * Snapshots survive Stop/Deinit and failed reinitialization; successful Init
+ * starts a new diagnostic session. No automatic error clearing/recovery.
+ */
+Can_Status CanDriver_GetDiagnostics(Can_Diagnostics *out);
 
 /* OK means accepted, not transmitted. Input is copied before return.
  * No second request is accepted until PollTx returns OK for this request.

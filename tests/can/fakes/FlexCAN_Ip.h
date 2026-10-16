@@ -16,7 +16,8 @@ typedef bool boolean;
 #define NULL_PTR NULL
 #define INST_FLEXCAN_0 0U
 #define FLEXCAN_MSG_ID_STD 0
-#define FLEXCAN_LOOPBACK_MODE 1
+#define FLEXCAN_NORMAL_MODE 0
+#define FLEXCAN_LOOPBACK_MODE 2
 #define FLEXCAN_PAYLOAD_SIZE_8 0
 typedef enum {
     FLEXCAN_STATUS_SUCCESS, FLEXCAN_STATUS_ERROR, FLEXCAN_STATUS_BUSY,
@@ -63,4 +64,7 @@ Flexcan_Ip_StatusType FlexCAN_Ip_AbortTransfer(uint8, uint8);
 Flexcan_Ip_StatusType FlexCAN_Ip_SetStopMode(uint8);
 Flexcan_Ip_StatusType FlexCAN_Ip_Deinit(uint8);
 boolean FlexCAN_Ip_GetStopMode(uint8);
+uint32 FlexCAN_Ip_GetErrorStatus(uint8);
+uint8 FlexCAN_Ip_GetControllerTxErrorCounter(uint8);
+uint8 FlexCAN_Ip_GetControllerRxErrorCounter(uint8);
 #endif

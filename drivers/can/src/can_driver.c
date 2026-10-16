@@ -17,6 +17,10 @@
  */
 static Can_DriverState s_state = CAN_DRIVER_UNINITIALIZED;
 static Can_Config s_config;
+static Flexcan_Ip_ConfigType s_rtd_config;
+static Can_Diagnostics s_diagnostics;
+static bool s_rtd_initialized;
+static bool s_diagnostic_access; /* Module running, not stopped/being deinitialized. */
 static bool s_tx_pending;
 static Flexcan_Ip_MsgBuffType s_rx_buffer;
 /* RTD reads TX through uint32 pointers on S32K144; guarantee alignment. */
@@ -40,8 +44,72 @@ static Can_Status Can_MapStatus(Flexcan_Ip_StatusType status)
     }
 }
 
+/* Device masks decode RTD return values; no CAN register access here. */
+#define CAN_ERROR_EVENTS (FLEXCAN_ESR1_ACKERR_MASK | FLEXCAN_ESR1_BIT0ERR_MASK | \
+    FLEXCAN_ESR1_BIT1ERR_MASK | FLEXCAN_ESR1_CRCERR_MASK | \
+    FLEXCAN_ESR1_FRMERR_MASK | FLEXCAN_ESR1_STFERR_MASK | \
+    FLEXCAN_ESR1_ERRINT_MASK | FLEXCAN_ESR1_BOFFINT_MASK | \
+    FLEXCAN_ESR1_TWRNINT_MASK | FLEXCAN_ESR1_RWRNINT_MASK | FLEXCAN_ESR1_ERROVR_MASK)
+
+static void Can_RecordFault(Can_Status status)
+{
+    if (s_diagnostics.first_fault_valid == 0U)
+    {
+        s_diagnostics.first_fault_valid = 1U;
+        s_diagnostics.first_fault_status = status;
+        s_diagnostics.first_fault_sample_valid = s_diagnostics.valid;
+        s_diagnostics.first_fault = s_diagnostics.latest;
+    }
+}
+
+static void Can_CaptureDiagnostics(void)
+{
+    Can_DiagnosticSample sample = {0};
+    uint32 fault;
+    if (!s_rtd_initialized || !s_diagnostic_access)
+    {
+        return;
+    }
+    sample.esr1 = FlexCAN_Ip_GetErrorStatus(CAN_CFG_INSTANCE);
+    sample.tx_error_counter = FlexCAN_Ip_GetControllerTxErrorCounter(CAN_CFG_INSTANCE);
+    sample.rx_error_counter = FlexCAN_Ip_GetControllerRxErrorCounter(CAN_CFG_INSTANCE);
+    fault = (sample.esr1 & FLEXCAN_ESR1_FLTCONF_MASK) >> FLEXCAN_ESR1_FLTCONF_SHIFT;
+    sample.fault_state = (fault >= 2U) ? CAN_FAULT_BUS_OFF :
+                         ((fault == 1U) ? CAN_FAULT_PASSIVE : CAN_FAULT_ACTIVE);
+    sample.tx_warning = ((sample.esr1 & FLEXCAN_ESR1_TXWRN_MASK) != 0U);
+    sample.rx_warning = ((sample.esr1 & FLEXCAN_ESR1_RXWRN_MASK) != 0U);
+    sample.ack_error = ((sample.esr1 & FLEXCAN_ESR1_ACKERR_MASK) != 0U);
+    sample.bit0_error = ((sample.esr1 & FLEXCAN_ESR1_BIT0ERR_MASK) != 0U);
+    sample.bit1_error = ((sample.esr1 & FLEXCAN_ESR1_BIT1ERR_MASK) != 0U);
+    sample.crc_error = ((sample.esr1 & FLEXCAN_ESR1_CRCERR_MASK) != 0U);
+    sample.form_error = ((sample.esr1 & FLEXCAN_ESR1_FRMERR_MASK) != 0U);
+    sample.stuff_error = ((sample.esr1 & FLEXCAN_ESR1_STFERR_MASK) != 0U);
+    s_diagnostics.latest = sample;
+    s_diagnostics.valid = 1U;
+    if (s_diagnostics.sample_count != UINT32_MAX)
+    {
+        ++s_diagnostics.sample_count;
+    }
+    s_diagnostics.accumulated_error_events |= sample.esr1 & CAN_ERROR_EVENTS;
+    if ((s_diagnostics.first_error_valid == 0U) &&
+        (((sample.esr1 & CAN_ERROR_EVENTS) != 0U) ||
+         (sample.fault_state != CAN_FAULT_ACTIVE) || sample.tx_warning || sample.rx_warning))
+    {
+        s_diagnostics.first_error_valid = 1U;
+        s_diagnostics.first_error = sample;
+    }
+    if ((sample.fault_state == CAN_FAULT_BUS_OFF) ||
+        ((sample.esr1 & FLEXCAN_ESR1_BOFFINT_MASK) != 0U))
+    {
+        s_diagnostics.bus_off_seen = 1U;
+        Can_RecordFault(CAN_STATUS_HW_ERROR);
+    }
+}
+
 static Can_Status Can_Fail(Flexcan_Ip_StatusType status)
 {
+    Can_CaptureDiagnostics();
+    Can_RecordFault(Can_MapStatus(status));
     s_state = CAN_DRIVER_FAULT;
     return Can_MapStatus(status);
 }
@@ -86,7 +154,8 @@ static bool Can_BaselineMatches(void)
 Can_Status CanDriver_Init(const Can_Config *config)
 {
     Flexcan_Ip_StatusType status;
-    if ((config == NULL) || (config->rx_id > CAN_CFG_MAX_STANDARD_ID))
+    if ((config == NULL) || (config->rx_id > CAN_CFG_MAX_STANDARD_ID) ||
+        ((config->mode != CAN_MODE_LOOPBACK) && (config->mode != CAN_MODE_NORMAL)))
     {
         return CAN_STATUS_INVALID_ARGUMENT;
     }
@@ -104,8 +173,13 @@ Can_Status CanDriver_Init(const Can_Config *config)
      */
     Can_DisableNvic();
     s_config = *config;
+    s_rtd_config = FlexCAN_Config0;
+    s_rtd_config.flexcanMode = (config->mode == CAN_MODE_NORMAL) ?
+                              FLEXCAN_NORMAL_MODE : FLEXCAN_LOOPBACK_MODE;
     s_tx_pending = false;
-    status = FlexCAN_Ip_Init(CAN_CFG_INSTANCE, &FlexCAN_State0, &FlexCAN_Config0);
+    s_rtd_initialized = false;
+    s_diagnostic_access = false;
+    status = FlexCAN_Ip_Init(CAN_CFG_INSTANCE, &FlexCAN_State0, &s_rtd_config);
     if (status != FLEXCAN_STATUS_SUCCESS)
     {
         /* RTD may not have published its state pointer. Never call transfer
@@ -113,10 +187,18 @@ Can_Status CanDriver_Init(const Can_Config *config)
          */
         return Can_Fail(status);
     }
+    /* Reset only after a fully successful Init, including IRQ suppression. */
+    s_rtd_initialized = true;
+    s_diagnostic_access = true;
     status = FlexCAN_Ip_DisableInterrupts(CAN_CFG_INSTANCE);
     if (status != FLEXCAN_STATUS_SUCCESS)
     {
         return Can_Fail(status);
+    }
+    {
+        const Can_Diagnostics fresh = {0};
+        s_diagnostics = fresh;
+        s_diagnostics.mode = s_config.mode;
     }
     s_state = CAN_DRIVER_READY;
     return CAN_STATUS_OK;
@@ -143,6 +225,7 @@ Can_Status CanDriver_Start(void)
     {
         return Can_Fail(status);
     }
+    s_diagnostic_access = true;
     status = FlexCAN_Ip_ConfigRxMb(CAN_CFG_INSTANCE, CAN_CFG_RX_MB, &info,
                                   s_config.rx_id);
     if (status != FLEXCAN_STATUS_SUCCESS)
@@ -306,12 +389,16 @@ Can_Status CanDriver_Stop(void)
     {
         return Can_Fail(status);
     }
+    /* Stop may leave MDIS set even on timeout; save evidence beforehand. */
+    Can_CaptureDiagnostics();
+    s_diagnostic_access = false;
     status = FlexCAN_Ip_SetStopMode(CAN_CFG_INSTANCE);
     if (status != FLEXCAN_STATUS_SUCCESS)
     {
         return Can_Fail(status);
     }
     s_state = CAN_DRIVER_READY;
+    s_diagnostic_access = false;
     return CAN_STATUS_OK;
 }
 
@@ -325,6 +412,9 @@ Can_Status CanDriver_Deinit(void)
     /* This RTD Deinit can run even if Init failed before publishing state.
      * It ignores the internal Disable return; check GetStopMode afterwards.
      */
+    /* Do not sample registers after Deinit may have disabled the module. */
+    Can_CaptureDiagnostics();
+    s_diagnostic_access = false;
     status = FlexCAN_Ip_Deinit(CAN_CFG_INSTANCE);
     if (status != FLEXCAN_STATUS_SUCCESS)
     {
@@ -336,6 +426,7 @@ Can_Status CanDriver_Deinit(void)
     }
     Can_DisableNvic();
     s_tx_pending = false;
+    s_rtd_initialized = false;
     s_state = CAN_DRIVER_UNINITIALIZED;
     return CAN_STATUS_OK;
 }
@@ -343,4 +434,26 @@ Can_Status CanDriver_Deinit(void)
 Can_DriverState CanDriver_GetState(void)
 {
     return s_state;
+}
+
+Can_Status CanDriver_PollDiagnostics(void)
+{
+    if (s_state != CAN_DRIVER_RUNNING)
+    {
+        return CAN_STATUS_BAD_STATE;
+    }
+    Can_CaptureDiagnostics();
+    return CAN_STATUS_OK;
+}
+
+Can_Status CanDriver_GetDiagnostics(Can_Diagnostics *out)
+{
+    if (out == NULL)
+    {
+        return CAN_STATUS_INVALID_ARGUMENT;
+    }
+    *out = s_diagnostics;
+    out->driver_state = s_state;
+    out->tx_pending = s_tx_pending ? 1U : 0U;
+    return CAN_STATUS_OK;
 }

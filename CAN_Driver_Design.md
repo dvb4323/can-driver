@@ -1,6 +1,48 @@
-# CAN Driver Design - Phase 1 RTD Adapter
+# CAN Driver Design - RTD Adapter (Phase 3 current contract)
 
 Date: 2026-10-15
+
+## Phase 3 contract update (takes precedence over the historical Phase 1 sections below)
+
+Software implementation is approved. Physical testing remains unauthorized until VP230 logic-level compatibility and onboard SBC RX isolation are verified. The user reported Phase 2 internal loopback PASS on the board; the Phase 3 changes have not been built or executed. All builds/debugging are user-operated in S32DS UI.
+
+The architecture remains a foreground singleton adapter over unmodified RTD. CAN0, TX MB0, RX MB1, standard Classic data frames, static aligned TX storage, stable RX storage, busy handling, RTD polling services, immediate RX re-registration, null callbacks, disabled CAN IRQs and DMA-off guard are retained. Board pin setup is a separate module; application and SPI do not acquire RTD types.
+
+### Configuration and mode
+
+`Can_Config` now contains `rx_id` and `Can_Mode mode` (`CAN_MODE_LOOPBACK=0`, `CAN_MODE_NORMAL=1`). Invalid modes/IDs are rejected before hardware access. `CAN_CONFIG_DEFAULT` initializes loopback explicitly. Rebuild every caller after this public structure change.
+
+`CanDriver_Init` still validates the complete generated loopback baseline. It copies `FlexCAN_Config0` into private static `s_rtd_config`, changes only `flexcanMode`, and passes that copy plus generated `FlexCAN_State0` to RTD. The generated constant/state and every file in `generate/`, `RTD/` and `.mex` remain unchanged. Mode is fixed until a deliberate safe Stop/Deinit/new Init or reset. No runtime mode setter is added.
+
+RTD sets normal LPB=0, LOM=0 and SRXDIS=1; loopback sets LPB=1, LOM=0 and SRXDIS=0. Normal-mode RX therefore requires another node's frame. Clock initialization and raw timing remain unchanged: 500 kbit/s is derived from an expected 48 MHz PE clock, not measured by this implementation.
+
+### Diagnostics API and sampling
+
+`CanDriver_PollDiagnostics()` is an explicit foreground service, RUNNING only. Call once per polling round, whether TX/RX return BUSY/NO_DATA or complete. Separate independent TX/RX calls do not define a round, so neither implicitly performs a regular ESR1 sample. `main.c` calls this service once before TX/RX each iteration. `Can_Fail` also attempts a final sample before publishing a wrapper fault; Stop/Deinit capture before possibly disabling the controller. No sampling occurs after failed RTD Init or once register access may have been disabled.
+
+`CanDriver_GetDiagnostics(Can_Diagnostics *out)` validates its pointer and copies RAM only in any state, including UNINITIALIZED/FAULT. It overlays current driver state and TX-pending ownership. It returns OK for a valid output pointer even when `valid=0`; callers must examine validity. It never invokes RTD or clears evidence.
+
+The cached structure includes the session mode, latest `Can_DiagnosticSample`, saturating sample count, event-only accumulation, first observed hardware-error sample, first wrapper-fault/bus-off sample/status, validity flags and a sticky `bus_off_seen`. Samples contain raw ESR1, sequentially read TX/RX counters, decoded fault state, warnings and ACK/bit/CRC/form/stuff indicators. FLTCONF 00=active, 01=passive, 1x=bus-off. FLTCONF/current state is never ORed into accumulated events.
+
+ESR1 is read once per capture using actual `FlexCAN_Ip_GetErrorStatus`; ECR counters use the verified public RTD getters. Read-sensitive protocol events are retained in the first-error snapshot/event accumulation. No ClearErrorStatus, error-IRQ enable or private hardware helper is called. These snapshots are sequential observations, not atomic. Do not watch live ESR1 in the debugger.
+
+Snapshots survive Stop/Deinit and failed reinitialization. Successful Init, including IRQ suppression, begins a fresh diagnostic session with `valid=0`. A failed reinitialization can leave a last-valid sample/mode from the previous session; the validity flag means a cached sample exists, not that it was sampled during the failed call. With no prior sample, `first_fault_sample_valid=0`. The first fault remains immutable for the session. Current application failure status is separately retained in `g_can_test`.
+
+Bus-off is latched diagnostically and causes the application one-shot test to FAIL; it does not cancel or overwrite TX or automatically change the wrapper to FAULT. RTD API failures retain the existing FAULT transition. Transient bus errors alone do not masquerade as transfer failures. The generated controller recovery policy is retained. Pending TX may keep retrying after the application holds results.
+
+### Application and board integration
+
+`board/board_can.c` owns PORTE PCR4/5 setup only. It verifies PCC present/gate bits, checks both pin locks before mutation, accepts an already compatible locked pin, replaces MUX with ALT5, clears IRQC/PE/PS, preserves other pad settings, writes ISF=0 to avoid unintended W1C clearing, and verifies fields by readback. It does not initialize clocks, CAN, SBC, GPIO direction or another pin. `BoardCan_GetDiagnostics` is cache-only. Board failure can leave a partial pin change on readback failure; there is no unsafe automatic rollback.
+
+`src/main.c` uses `CAN_TEST_PROFILE=0` (LOOPBACK) by default; `1` selects NORMAL_TWO_NODE. Normal profile additionally requires `CAN_TEST_HARDWARE_VERIFIED=1`. This is a deliberate build-time assertion after human verification/authorization, not a hardware probe. With its default zero, normal profile records failure HARDWARE_NOT_VERIFIED before pin/CAN initialization. Loopback skips board setup entirely.
+
+Both profiles transmit once: ID 0x14, DLC 8, `01 02 03 04 05 06 07 00`. Loopback expects itself. Normal expects STM32 ID 0x14, DLC 8, `A1 A2 A3 A4 A5 A6 A7 A8`. RX and TX completion are independent. Iteration-budget TIMEOUT, first failure and diagnostics are preserved without automatic Stop/Deinit/resend. `CanTest_HoldResults` is the breakpoint; `g_can_test` is the RAM object to inspect. The updated code requires a fresh user-operated build/regression; the old Phase 2 PASS is not verification of this revision.
+
+See `CAN_Phase3_Implementation_Report.md` for changed files, verification limits and the exact UI procedure. Host tests and fakes cover mode/config isolation, read-sensitive diagnostics, lifecycle/ownership, board checks and application profiles/budgets; they are updated but not executed in this phase.
+
+## Historical Phase 1 design
+
+The remaining sections record the original Phase 1 scope and contracts. The current Phase 3 update above supersedes statements that limit operation to loopback, pass the original configuration pointer, defer diagnostics/physical-mode software, or leave main interrupt-based. Earlier reports are retained as historical evidence.
 
 ## Scope and architecture decision
 
