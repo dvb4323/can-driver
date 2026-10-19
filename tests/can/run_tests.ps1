@@ -25,3 +25,8 @@ foreach ($case in $appCases) {
     & $appExe
     if ($LASTEXITCODE -ne 0) { throw "Host application tests failed: $($case.Name)" }
 }
+$espExe = Join-Path $OutputDirectory 'can_esp32_tests.exe'
+& $Compiler -std=c99 -Wall -Wextra -Werror -pedantic "-I$PSScriptRoot/fakes" "-I$projectRoot/drivers/can/inc" "-I$projectRoot/board" "$PSScriptRoot/test_can_esp32.c" -o $espExe
+if ($LASTEXITCODE -ne 0) { throw 'Host ESP32 application compile failed' }
+& $espExe
+if ($LASTEXITCODE -ne 0) { throw 'Host ESP32 application tests failed' }

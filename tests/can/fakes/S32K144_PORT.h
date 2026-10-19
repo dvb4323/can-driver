@@ -3,6 +3,8 @@
 #include <stdint.h>
 typedef struct { volatile uint32_t PCR[32]; } PORT_Type;
 extern PORT_Type test_porte;
+extern PORT_Type test_portd;
+#define IP_PORTD (&test_portd)
 #define IP_PORTE (&test_porte)
 #define PORT_PCR_PS_MASK 0x1U
 #define PORT_PCR_PE_MASK 0x2U
